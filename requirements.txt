@@ -7,3 +7,4 @@ pypdf
 scipy
 sentence-transformers
 torch
+python-dotenv
