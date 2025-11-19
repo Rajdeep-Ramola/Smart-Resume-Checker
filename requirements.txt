@@ -1,0 +1,9 @@
+streamlit
+requests
+pandas
+numpy
+altair
+pypdf
+scipy
+sentence-transformers
+torch
