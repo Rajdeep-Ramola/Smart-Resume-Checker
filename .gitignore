@@ -1,0 +1,89 @@
+========================
+
+GENERAL PYTHON FILES
+
+========================
+
+pycache/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+venv/
+env/
+
+Python environment artifacts
+
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+Installer logs
+
+*.egg-info/
+*.egg
+*.whl
+
+========================
+
+SENSITIVE & SECRET DATA
+
+========================
+
+1. API Keys and Environment Variables
+
+These files contain keys for OpenAI/Gemini/Perplexity, so they MUST be ignored.
+
+.env
+.env.*
+
+2. Streamlit Secrets (for cloud deployment)
+
+.streamlit/secrets.toml
+
+========================
+
+MACHINE LEARNING / CACHE
+
+========================
+
+1. Local Model Caching
+
+This directory stores the downloaded model weights (BAAI/bge-small-en-v1.5)
+
+and prevents them from being uploaded (approx. 133MB).
+
+.model_cache/
+
+2. PyTorch/Hugging Face Cache
+
+Local cache folders where models download to if not explicitly redirected.
+
+.cache/
+.huggingface/
+.pt_cache/
+.vscode/
+
+3. Streamlit Local Cache
+
+Streamlit's cache storage for @st.cache_data and @st.cache_resource
+
+.streamlit/
+!*.toml # Allow secrets.toml, but block other cache files
+
+========================
+
+OPERATING SYSTEM FILES
+
+========================
+
+Windows
+
+Thumbs.db
+ehthumbs.db
+
+macOS
+
+.DS_Store
