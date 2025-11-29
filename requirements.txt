@@ -10,5 +10,6 @@ torch
 python-dotenv
 langchain
 langchain-google-genai
+langchain-core<0.3.0
 pydantic
-google-generativeai
+langchain-community
