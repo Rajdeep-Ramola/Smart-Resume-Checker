@@ -5,798 +5,418 @@ import altair as alt
 import numpy as np
 from scipy.spatial.distance import cosine
 import os
-# --- REMOVED: requests, json (replaced by openai) ---
-import json # Keep json for parsing
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-# --- ADDED: OpenAI imports ---
-from openai import OpenAI
-from openai import APIError
 
-load_dotenv()
+# --- LangChain Imports
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+from pydantic import BaseModel, Field
+from typing import List, Optional
+
+load_dotenv() 
 
 # --- Configuration & Constants ---
-
-# Configuration for local model (used for Semantic Scoring)
 LOCAL_MODEL_ID = "BAAI/bge-small-en-v1.5"
+GEMINI_MODEL = "models/gemini-1.5-flash" 
 
-# --- OPENAI API CONFIGURATION (NEW) ---
-OPENAI_MODEL = "gpt-4o" # Use a model supporting JSON mode
-# Key variable changed to OPENAI_API_KEY
 try:
-    # Use st.secrets if in Streamlit Cloud, otherwise environment variable
-    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or st.secrets["OPENAI_API_KEY"]
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets["GEMINI_API_KEY"]
 except:
-    OPENAI_API_KEY = ""
+    GEMINI_API_KEY = ""
 
-# Initialize OpenAI Client (Globally/Statically)
-OPENAI_CLIENT = None
-if OPENAI_API_KEY:
-    try:
-        OPENAI_CLIENT = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception as e:
-        st.error(f"Error initializing OpenAI Client: {e}")
+# --- PYDANTIC SCHEMAS (STRUCTURED OUTPUT) ---
+# These define the strict shape of data we want Gemini to extract.
 
-# --- DYNAMIC JSON SCHEMAS (UNCHANGED, only used for defining structure) ---
+class ResumeExtraction(BaseModel):
+    """Schema for extracting resume information."""
+    # Universal Fields
+    professional_summary: str = Field(description="A concise summary of the candidate's background.", default="N/A")
+    career_objective: str = Field(description="The candidate's career goals.", default="N/A")
+    experience_summary: str = Field(description="A summarized paragraph of work history.", default="N/A")
+    education: List[str] = Field(description="List of degrees and schools.", default=[])
+    skills: List[str] = Field(description="List of technical and soft skills.", default=[])
+    certifications: List[str] = Field(description="List of certifications and licenses.", default=[])
+    
+    # Role-Specific / Optional Fields (AI will fill these if found)
+    key_projects: List[str] = Field(description="List of key projects (Tech/Data roles).", default=[])
+    key_achievements: List[str] = Field(description="List of quantifiable achievements (Business/Sales/Finance).", default=[])
+    research_publications: List[str] = Field(description="List of publications (Academic roles).", default=[])
+    teaching_philosophy: str = Field(description="Teaching philosophy (Education roles).", default="N/A")
 
-UNIVERSAL_RESUME_PROPS = {
-    "Relevant_Skills": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "List technical skills, tools, and languages (e.g., Python, Scrum)."},
-    "Certifications_and_Degrees": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "List professional certifications and degrees (e.g., CPA, MBA, B.Tech CS)."},
-    "Most_Relevant_Experience_Summary": {"type": "STRING", "description": "Summarize core professional experience relevant to this field in one concise paragraph."},
-    "Key_Achievements": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "Extract 3-5 major quantifiable accomplishments (e.g., Reduced cost by 15%)."},
-    "Key_Projects": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "List 3-5 most impactful personal or professional projects (e.g., E-commerce API, Fraud Detection Model)."},
-}
+class JDExtraction(BaseModel):
+    """Schema for extracting Job Description requirements."""
+    job_title: str = Field(description="The exact job title.", default="N/A")
+    responsibilities_summary: str = Field(description="Summary of core duties.", default="N/A")
+    required_skills: List[str] = Field(description="List of mandatory skills.", default=[])
+    min_experience: str = Field(description="Minimum years of experience.", default="N/A")
+    min_education: str = Field(description="Minimum education level.", default="N/A")
+    preferred_certifications: List[str] = Field(description="List of preferred certifications.", default=[])
 
-JD_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "Job_Title_Extracted": {"type": "STRING", "description": "The exact title of the job role (e.g., Senior Data Engineer)."},
-        "Core_Responsibilities_Summary": {"type": "STRING", "description": "Summarize the 5-7 most important duties of this job in a single paragraph."},
-        "Must_Have_Skills": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "List all hard skills, languages, and required software mentioned as mandatory."},
-        "Min_Years_Experience": {"type": "STRING", "description": "The minimum and preferred years of experience required (e.g., '5+ years' or '3-5 years')."},
-        "Minimum_Education_Level": {"type": "STRING", "description": "The minimum education level specified (e.g., Bachelor's Degree, Master's Degree)."},
-        "Preferred_Certifications": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "List any specific certifications mentioned as preferred or required."},
-    },
-    "required": ["Job_Title_Extracted", "Core_Responsibilities_Summary", "Must_Have_Skills"]
-}
-
-# Role-Specific Schema Definition (Used for determining fields to request)
-ROLE_SPECIFIC_SCHEMAS = {
-    "Software Engineer": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Projects", "Certifications_and_Degrees"], "base": {}},
-    "Data Scientist": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Projects", "Certifications_and_Degrees"], "base": {}},
-    "Cloud Architect": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Cybersecurity Analyst": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Financial Analyst": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Accountant/Auditor": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Elementary School Teacher": {"fields": ["Teaching_Training_Summary", "Relevant_Skills", "Certifications_and_Degrees", "Key_Achievements"], "base": {
-        "Teaching_Training_Summary": {"type": "STRING", "description": "Summarize all teaching experience, classroom management methods, and professional development training in one paragraph."},
-    }},
-    "University Professor": {"fields": ["Research_and_Publications", "Relevant_Skills", "Certifications_and_Degrees", "Key_Achievements"], "base": {
-        "Research_and_Publications": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "List major publications, grants, or research areas (e.g., Published 5 papers on deep learning)."},
-    }},
-    "Project Manager (IT/Tech)": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Digital Marketing Manager": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Sales Specialist": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "HR Generalist": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Supply Chain Analyst": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Health Informatics Specialist": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "Technical Writing": {"fields": ["Most_Relevant_Experience_Summary", "Relevant_Skills", "Key_Achievements", "Certifications_and_Degrees"], "base": {}},
-    "High School Teacher": {"fields": ["Teaching_Training_Summary", "Relevant_Skills", "Certifications_and_Degrees", "Key_Achievements"], "base": {
-        "Teaching_Training_Summary": {"type": "STRING", "description": "Summarize all teaching experience, classroom management methods, and professional development training in one paragraph."},
-    }},
-    "Special Education Teacher": {"fields": ["Teaching_Training_Summary", "Relevant_Skills", "Certifications_and_Degrees", "Key_Achievements"], "base": {
-        "Teaching_Training_Summary": {"type": "STRING", "description": "Summarize all teaching experience, classroom management methods, and professional development training in one paragraph."},
-    }},
-}
-
-# --- HIERARCHICAL JOB-SPECIFIC KEYWORDS (UNCHANGED) ---
+# --- HIERARCHICAL KEYWORDS (Unchanged) ---
 HIERARCHICAL_JOB_KEYWORDS = {
     "Technology & Engineering": {
-        "Software Engineer": {
-             'python', 'java', 'c++', 'c#', 'oop', 'algorithms', 'data_structures',
-             'testing', 'tdd', 'agile', 'scrum', 'backend', 'api', 'design_patterns', 'git',
-             'bs_cs', 'ms_cs', 'btech', 'mtech'
-        },
-        "Cybersecurity Analyst": {
-             'siem', 'soc', 'firewall', 'incident_response', 'palo_alto',
-             'cissp', 'security', 'vulnerability', 'penetration', 'forensics',
-             'threat_modeling', 'iso27001', 'security+', 'cism', 'ceh', 'bs_it'
-        },
-        "Cloud Architect": {
-             'aws', 'azure', 'gcp', 'terraform', 'kubernetes', 'docker',
-             'ci/cd', 'iac', 'vpc', 'ec2', 'lambda', 's3', 'network',
-             'aws_cert', 'azure_cert', 'gcp_cert', 'ccnp'
-        },
-        "Web Developer": {
-             'javascript', 'typescript', 'react', 'angular', 'vue', 'html',
-             'css', 'node', 'express', 'django', 'flask', 'api', 'rest',
-             'bs_cs', 'bca', 'mca', 'fullstack'
-        }
+        "Software Engineer": {'python', 'java', 'c++', 'oop', 'system_design', 'api', 'git', 'sql', 'docker', 'kubernetes', 'aws', 'testing'},
+        "Cybersecurity Analyst": {'siem', 'soc', 'firewall', 'incident_response', 'palo_alto', 'cissp', 'security', 'vulnerability', 'penetration'},
+        "Cloud Architect": {'aws', 'azure', 'gcp', 'terraform', 'kubernetes', 'docker', 'ci/cd', 'iac', 'vpc', 'ec2'},
+        "Web Developer": {'javascript', 'typescript', 'react', 'angular', 'vue', 'html', 'css', 'node', 'express', 'django'}
     },
     "Data & AI": {
-        "Data Scientist": {
-             'python', 'r', 'scikit', 'tensorflow', 'pytorch', 'keras',
-             'statistics', 'machine', 'learning', 'mlops', 'nlp', 'vision',
-             'models', 'predictive', 'analysis', 'experimentation', 'ab_test',
-             'ms_data_science', 'phd', 'masters', 'sas', 'spss'
-        },
-        "Data Engineer": {
-             'python', 'sql', 'spark', 'hadoop', 'kafka', 'airflow', 'databricks',
-             'snowflake', 'bigquery', 'redshift', 'etl', 'elt', 'dbt', 'pipeline',
-             'ms_engineering', 'bs_it', 'btech'
-        }
+        "Data Scientist": {'python', 'r', 'sql', 'machine_learning', 'statistics', 'pandas', 'numpy', 'scikit-learn', 'tensorflow', 'pytorch'},
+        "Data Engineer": {'python', 'sql', 'spark', 'hadoop', 'kafka', 'airflow', 'databricks', 'snowflake', 'bigquery', 'etl'}
     },
     "Finance & Accounting": {
-        "Financial Analyst": {
-             'valuation', 'modeling', 'forecasting', 'budgeting', 'excel',
-             'sap', 'due_diligence', 'financial_statements', 'pivot_tables',
-             'mergers', 'acquisitions', 'vba',
-             'cfa', 'mba', 'ms_finance', 'bs_finance'
-        },
-        "Accountant/Auditor": {
-             'GAAP', 'IFRS', 'CPA', 'auditing', 'reconciliation',
-             'accounts_payable', 'accounts_receivable', 'tax_prep',
-             'quickbooks', 'journal_entries', 'compliance', 'sox',
-             'cpa', 'ca', 'ms_accounting', 'bs_accounting'
-        }
+        "Financial Analyst": {'excel', 'financial_modeling', 'forecasting', 'valuation', 'sql', 'tableau', 'power_bi', 'accounting'},
+        "Accountant/Auditor": {'gaap', 'reconciliation', 'general_ledger', 'tax', 'audit', 'quickbooks', 'excel', 'compliance', 'sox'}
     },
     "Education Sector": {
-        "Elementary School Teacher": {
-             'classroom_management', 'common_core', 'phonics', 'curriculum_development',
-             'differentiated_instruction', 'parent_communication', 'early_childhood',
-             'masters_education', 'ba_education', 'teaching_license'
-        },
-        "University Professor": {
-              'research_grants', 'peer_review', 'dissertation_advising',
-              'publications', 'curriculum_design', 'academic_service',
-              'phd', 'doctorate', 'tenure'
-        }
+        "Elementary School Teacher": {'classroom_management', 'common_core', 'phonics', 'curriculum_development', 'differentiation', 'parent_communication'},
+        "University Professor": {'research', 'publication', 'grant_writing', 'lecturing', 'curriculum_development', 'mentoring', 'phd'}
     },
-    "Project Management": {
-        "Project Manager (IT/Tech)": {
-             'pmp', 'agile', 'scrum', 'waterfall', 'jira', 'confluence',
-             'risk_mitigation', 'stakeholder', 'budgeting', 'scheduling',
-             'ms_project', 'scope', 'certifications',
-             'pmp', 'csm', 'masters', 'mba'
-        }
+    "Business & Management": {
+        "Project Manager (IT/Tech)": {'pmp', 'agile', 'scrum', 'waterfall', 'jira', 'risk_management', 'stakeholder', 'budgeting'},
+        "Business Analyst": {'sql', 'requirements_gathering', 'process_mapping', 'visio', 'agile', 'user_stories', 'testing', 'uml'}
     },
     "Marketing & Sales": {
-        "Digital Marketing Manager": {
-             'SEO', 'SEM', 'PPC', 'Google_Analytics', 'HubSpot',
-             'content_strategy', 'A/B_testing', 'lead_gen', 'social_media',
-             'campaigns', 'crm', 'conversion_rate',
-             'mba', 'google_cert', 'ms_marketing'
-        }
-    },
-    "Human Resources (HR)": {
-        "HR Generalist": {
-             'SHRM', 'PHR', 'recruitment', 'onboarding', 'compensation',
-             'benefits', 'HRIS', 'compliance', 'employee_relations',
-             'talent_acquisition', 'succession_planning',
-             'shrm_cp', 'phr', 'mba', 'masters'
-        }
-    },
-    "Supply Chain & Logistics": {
-        "Supply Chain Analyst": {
-             'SCM', 'ERP', 'procurement', 'forecasting', 'logistics',
-             'inventory', 'warehouse', 'SAP', 'optimisation', 'lean_six_sigma',
-             'demand_planning',
-             'cscp', 'apics', 'mba', 'masters'
-        }
-    },
-    "Healthcare/Clinical": {
-        "Health Informatics Specialist": {
-             'HIPAA', 'EMR', 'EHR', 'ICD-10', 'clinical_trials',
-             'HL7', 'LIS', 'PACS', 'compliance', 'health_data', 'informatics',
-             'rhia', 'ccds', 'masters', 'bachelors'
-        }
-    },
-    "Technical Writing": {
-        "Technical Writer": {
-             'MadCap', 'Confluence', 'markdown', 'DITA', 'API_documentation',
-             'user_guides', 'editing', 'xml', 'authoring_tools', 'git',
-             'masters', 'bachelors'
-        }
+        "Digital Marketing Manager": {'seo', 'sem', 'google_analytics', 'hubspot', 'content_strategy', 'campaigns', 'crm', 'conversion_rate'},
+        "Sales Specialist": {'crm', 'salesforce', 'pipeline', 'prospecting', 'b2b', 'negotiation', 'territory_management'}
     }
 }
-
 DOMAIN_OPTIONS = list(HIERARCHICAL_JOB_KEYWORDS.keys())
-# --- End HIERARCHICAL_JOB_KEYWORDS ---
 
-# --- Load Model Once (LOCAL EMBEDDING IMPLEMENTATION - UNCHANGED) ---
-
-@st.cache_resource(show_spinner=f"Downloading and loading {LOCAL_MODEL_ID} Sentence Transformer...")
+# --- Load Model Once ---
+@st.cache_resource(show_spinner=f"Downloading {LOCAL_MODEL_ID}...")
 def load_local_embedding_model(model_name):
     try:
         from sentence_transformers import SentenceTransformer
-        CACHE_DIR = os.path.join(os.getcwd(), ".model_cache")
+        CACHE_DIR = os.path.join(os.getcwd(), ".model_cache") 
         os.makedirs(CACHE_DIR, exist_ok=True)
         return SentenceTransformer(model_name, cache_folder=CACHE_DIR)
     except Exception as e:
         print(f"FATAL: Failed to initialize local embedding model. Error: {e}")
         return None
 
-# Global variable to hold the model instance
 LOCAL_EMBEDDING_MODEL = load_local_embedding_model(LOCAL_MODEL_ID)
 
+# --- LangChain Parsing Functions (Updated for Gemini) ---
 
-# --- OpenAI Parsing Functions (NEW) ---
+def get_llm():
+    if not GEMINI_API_KEY:
+        return None
+    # Initialize Gemini via LangChain
+    return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=GEMINI_API_KEY, temperature=0)
 
 @st.cache_data(show_spinner=False)
-def _call_openai_api(system_instruction, text_input, schema):
-    if not OPENAI_API_KEY or OPENAI_CLIENT is None:
-        return None
+def parse_resume_with_langchain(resume_text, selected_role):
+    llm = get_llm()
+    if not llm: return None
 
-    # Construct the message payload
-    messages = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": text_input}
-    ]
+    # Bind the Pydantic model to Gemini for structured output
+    structured_llm = llm.with_structured_output(ResumeExtraction)
 
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", f"You are an expert technical recruiter specializing in {selected_role} roles. Extract information strictly into the requested format."),
+        ("human", "Resume Content:\n{text}")
+    ])
+    
+    chain = prompt | structured_llm
+    
     try:
-        with st.spinner(f"AI Parsing ({OPENAI_MODEL})..."):
-            response = OPENAI_CLIENT.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=messages,
-                response_format={"type": "json_object", "schema": schema},
-                temperature=0.0 # Force deterministic output
-            )
-
-            # Extract the JSON string from the response
-            json_string = response.choices[0].message.content.strip()
-
-            # Safely parse the JSON string
-            parsed_data = json.loads(json_string)
-            return parsed_data
-
-    except APIError as e:
-        st.error(f"OpenAI API Error: {e.status_code}. Details: {e.message}")
-        return None
-    except json.JSONDecodeError:
-        st.error("OpenAI API Error: Received invalid JSON. Model may have failed to produce valid output.")
-        return None
+        with st.spinner("AI Extracting Resume Data..."):
+            return chain.invoke({"text": resume_text})
     except Exception as e:
-        st.error(f"An unexpected error occurred during parsing: {e}")
+        st.error(f"LangChain Error: {e}")
         return None
 
-
 @st.cache_data(show_spinner=False)
-def parse_resume_with_ai(resume_text, selected_role):
-    if not OPENAI_API_KEY or OPENAI_CLIENT is None: return None
+def parse_jd_with_langchain(jd_text, selected_role):
+    llm = get_llm()
+    if not llm: return None
 
-    role_info = ROLE_SPECIFIC_SCHEMAS.get(selected_role)
+    structured_llm = llm.with_structured_output(JDExtraction)
 
-    combined_properties = UNIVERSAL_RESUME_PROPS.copy()
-    if role_info and "base" in role_info:
-        combined_properties.update(role_info["base"])
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", f"You are an expert technical recruiter. Extract key requirements for a {selected_role} position."),
+        ("human", "Job Description:\n{text}")
+    ])
 
-    field_order = role_info["fields"] if role_info else list(UNIVERSAL_RESUME_PROPS.keys())
+    chain = prompt | structured_llm
+    
+    try:
+        with st.spinner("AI Extracting JD Data..."):
+            return chain.invoke({"text": jd_text})
+    except Exception as e:
+        st.error(f"LangChain Error: {e}")
+        return None
 
-    # Build the final schema structure required by OpenAI
-    final_schema = {
-        "type": "object", # Must be lowercase 'object' for OpenAI
-        "properties": combined_properties,
-        "required": list(combined_properties.keys()) # For best JSON compliance
-    }
-    # Note: 'propertyOrdering' is specific to Gemini, not directly supported in OpenAI schema.
+# --- Gap Analysis ---
+def check_critical_gaps(resume_data: ResumeExtraction, jd_data: JDExtraction):
+    gaps = []
+    
+    # 1. Check Experience
+    if jd_data.min_experience != "N/A":
+        if resume_data.experience_summary == "N/A" and not resume_data.key_achievements:
+            gaps.append(f"⚠️ **Missing Experience:** JD requires '{jd_data.min_experience}', but no experience summary found.")
 
-    system_instruction = (
-        f"You are an expert resume parser for the '{selected_role}' field. "
-        f"Extract the requested data from the resume strictly into the provided JSON format. "
-        f"If a specific field is not found or is empty, return 'N/A' for string fields and empty array ([]) for list fields. "
-        f"The user has provided the entire resume text. Do not add any extra commentary outside the JSON."
-    )
-    text_input = f"Analyze this resume for the role of '{selected_role}':\n\n{resume_text}"
+    # 2. Check Education
+    if jd_data.min_education != "N/A":
+        if not resume_data.education:
+             gaps.append(f"⚠️ **Missing Education:** JD requires '{jd_data.min_education}', but education section is empty.")
+    
+    # 3. Check Skills
+    if jd_data.required_skills:
+        if not resume_data.skills:
+             gaps.append("⚠️ **Missing Skills:** JD lists required skills, but resume skills section is empty.")
+             
+    # 4. Check Certifications (if strictly required)
+    if jd_data.preferred_certifications:
+        if not resume_data.certifications:
+             gaps.append("⚠️ **Missing Certifications:** JD lists preferred certifications, but none found in resume.")
 
-    return _call_openai_api(system_instruction, text_input, final_schema)
+    return gaps
 
-
-@st.cache_data(show_spinner=False)
-def parse_jd_with_ai(jd_text, selected_role):
-    if not OPENAI_API_KEY or OPENAI_CLIENT is None: return None
-
-    # Use the JD_SCHEMA directly (adjusting type case)
-    final_schema = JD_SCHEMA.copy()
-    final_schema["type"] = "object" # Must be lowercase 'object' for OpenAI
-
-    system_instruction = (
-        f"You are an expert job description parser for the '{selected_role}' field. "
-        f"Analyze the JD and extract all required fields strictly into the provided JSON format. "
-        f"If a field is not explicitly mentioned, return 'N/A' for that specific field. "
-        f"The user has provided the entire Job Description text. Do not add any extra commentary outside the JSON."
-    )
-    text_input = f"Analyze this Job Description for the role of '{selected_role}':\n\n{jd_text}"
-
-    return _call_openai_api(system_instruction, text_input, final_schema)
-
-
-# --- Stop Words (Unchanged) ---
-# ... (STOP_WORDS definition is unchanged)
-STOP_WORDS = {
-    'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has', 'he',
-    'in', 'is', 'it', 'its', 'of', 'on', 'or', 'that', 'the', 'to', 'was', 'with',
-    'i', 'me', 'my', 'we', 'us', 'our', 'you', 'your', 'this', 'that', 'were',
-    'have', 'had', 'do', 'does', 'did', 'but', 'so', 'if', 'then', 'than', 'up', 'down',
-    'out', 'will', 'would', 'can', 'could', 'should', 'using', 'tools', 'responsibilities',
-    'etc', 'e.g', 'i.e', 'also', 'just', 'only', 'may', 'must', 'could', 'which', 'who', 'when'
-}
-
-# --- File Extraction (Unchanged) ---
-# ... (extract_text_from_pdf function is unchanged)
+# --- Core Logic ---
 try:
     from pypdf import PdfReader
 except ImportError:
     class PdfReader:
-        def __init__(self, *args, **kwargs):
-            pass
+        def __init__(self, *args, **kwargs): pass
         @property
-        def pages(self):
-            return []
+        def pages(self): return []
 
 def extract_text_from_pdf(uploaded_file):
-    """Extracts text content from an uploaded PDF file stream."""
     text = ""
     try:
         reader = PdfReader(uploaded_file)
         for page in reader.pages:
             page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+            if page_text: text += page_text + "\n"
         return text
-    except Exception as e:
-        st.error(f"PDF Parsing Error: {e}")
-        return ""
+    except Exception: return ""
 
-# --- Core Analysis Logic (Unchanged) ---
-# ... (clean_and_tokenize, calculate_keyword_match_score, calculate_semantic_score, run_rules_based_checks are UNCHANGED)
-
+STOP_WORDS = {'a', 'an', 'the', 'and', 'or', 'in', 'on', 'at', 'to'}
 def clean_and_tokenize(text):
-    """Converts text to lowercase and tokenizes it, filtering out stop words and non-alphanumeric tokens."""
     text = text.lower()
     tokens = re.findall(r'\b\w+\b', text)
     return [token for token in tokens if token not in STOP_WORDS and len(token) > 1]
 
 def calculate_keyword_match_score(resume_tokens, jd_tokens):
-    """Calculates the keyword match score (Lexical Match)."""
     jd_unique_tokens = set(jd_tokens)
     resume_unique_tokens = set(resume_tokens)
-
-    jd_keywords = {t for t in jd_unique_tokens if len(t) > 3}
+    jd_keywords = {t for t in jd_unique_tokens if len(t) > 3} 
     resume_keywords = {t for t in resume_unique_tokens if len(t) > 3}
-
-    if not jd_keywords:
-        return 0, set(), jd_keywords
-
+    if not jd_keywords: return 0, set(), jd_keywords
     common_keywords = jd_keywords.intersection(resume_keywords)
-
     match_score = (len(common_keywords) / len(jd_keywords)) * 100
     missing_keywords = jd_keywords - common_keywords
-
     return match_score, common_keywords, missing_keywords
 
 def calculate_semantic_score(resume_text, jd_text):
-    """Calculates the Semantic Match Score using the LOCALLY LOADED Sentence Transformer model."""
-    if not resume_text or not jd_text or LOCAL_EMBEDDING_MODEL is None:
-        return 0.0
-
-    texts = [resume_text, jd_text]
-
+    if not resume_text or not jd_text or LOCAL_EMBEDDING_MODEL is None: return 0.0
     try:
-        embeddings = LOCAL_EMBEDDING_MODEL.encode(
-            texts,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False
-        )
+        embeddings = LOCAL_EMBEDDING_MODEL.encode([resume_text, jd_text], convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False)
+        similarity = 1 - cosine(embeddings[0], embeddings[1])
+        return (similarity + 1) / 2 * 100 
+    except: return 0.0
 
-        resume_embedding = embeddings[0]
-        jd_embedding = embeddings[1]
-
-        similarity = 1 - cosine(resume_embedding, jd_embedding)
-
-        # Scale from [-1, 1] to [0, 100]
-        semantic_score = (similarity + 1) / 2 * 100
-        return semantic_score
-
-    except Exception as e:
-        st.error(f"Error calculating local embeddings or cosine similarity: {e}")
-        return 0.0
-
-def run_rules_based_checks(resume_text, job_description_text):
-    """Performs compliance and quality checks using regex and logic."""
+def run_rules_based_checks(resume_text, jd_text):
     issues = []
     passed = []
     bullet_points = [line.strip() for line in re.split(r'[\r\n•*-]+', resume_text) if len(line.strip()) > 10]
-
-    # ------------------- 1. Structural/Compliance Checks -------------------
+    
     email_regex = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-    phone_regex = r'(\d{3}[-\.\s]??\d{3}[-\.\s]??\d{4}|\(\d{3}\)\s*\d{3}[-\.\s]??\d{4})'
-
-    if not re.search(email_regex, resume_text) or not re.search(phone_regex, resume_text):
-        issues.append("🔴 **Fatal Error: Missing Contact Info.** No clear email or phone number found. This guarantees ATS rejection.")
-
-    standard_sections = ["summary", "experience", "education", "skills"]
-    resume_lower = resume_text.lower()
-    missing_sections = [sec for sec in standard_sections if not re.search(r'\b' + sec + r'\b', resume_lower)]
-
-    if missing_sections:
-        issues.append(f"🔴 **Missing Core Sections:** Missing **{', '.join([s.capitalize() for s in missing_sections])}**. Use clear, conventional headings.")
-    else:
-        passed.append("🟢 Found all expected core sections (Summary, Experience, Education, Skills).")
-
-    date_patterns = [r'\d{4}', r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s\d{4}\b', r'\d{1,2}/\d{4}']
-
-    if not any(re.search(p, resume_text) for p in date_patterns):
-        issues.append("🟡 **Missing or Inconsistent Dates:** Could not find common date patterns. Ensure clear start/end dates for all experience to allow tenure validation.")
-    else:
-        passed.append("🟢 Detected employment date patterns for proper tenure tracking.")
-
-    # ------------------- 2. Writing Quality Checks -------------------
-    strong_verbs = {'achieved', 'analyzed', 'developed', 'designed', 'executed', 'led', 'managed', 'optimized', 'reduced', 'revamped', 'solved', 'spearheaded', 'improved', 'created', 'generated', 'initiated', 'mentored'}
-    weak_starters = ['responsible for', 'duties included', 'worked on', 'tasked with', 'i was']
-    weak_starter_count = 0
+    if not re.search(email_regex, resume_text):
+        issues.append("🔴 **Fatal Error: Missing Contact Info.** No clear email found.")
+    
+    strong_verbs = {'achieved', 'analyzed', 'developed', 'managed', 'created'} 
     strong_starter_count = 0
-
     for line in bullet_points:
-        line_lower = line.lower()
-        if any(line_lower.startswith(phrase) for phrase in weak_starters):
-            weak_starter_count += 1
-        first_word = line_lower.split()[0] if line_lower else ''
-        if first_word in strong_verbs:
-              strong_starter_count += 1
-
-    if weak_starter_count > 0:
-        issues.append(f"🟡 **Passive Language:** Found **{weak_starter_count}** bullets starting with weak phrases. **Suggestion:** Begin every bullet with a strong action verb.")
-    else:
-        passed.append(f"🟢 Good Action Verb Usage: Found {strong_starter_count} statements starting with strong verbs.")
-
-    quantifier_regex = r'(\d+[\.\,]?\d*\s?|[\$€£¥\%])'
+        if line.lower().split()[0] in strong_verbs: strong_starter_count += 1
+            
+    quantifier_regex = r'(\d+[\.\,]?\d*\s?|[\$€£¥\%])' 
     quantified_bullets = sum(1 for line in bullet_points if re.search(quantifier_regex, line))
     quantification_rate = (quantified_bullets / len(bullet_points)) if bullet_points else 0
-
+    
     if quantification_rate < 0.4:
-        issues.append(f"🔴 **Low Quantification Rate:** Only {quantified_bullets}/{len(bullet_points)} bullets contain measurable results. **Suggestion:** Quantify your impact with metrics, percentages, or dollar amounts.")
+        issues.append(f"🔴 **Low Quantification Rate:** Only {quantified_bullets} bullets contain numbers/metrics.")
     else:
-        passed.append(f"🟢 High Impact: {quantified_bullets}/{len(bullet_points)} statements contain measurable results.")
-
+        passed.append("🟢 High Impact: Good use of quantifiable metrics.")
+        
     return issues, passed, quantification_rate, strong_starter_count
 
-
-# --- Streamlit Application Structure (Minimal changes for API Key display) ---
+# --- Main App ---
 
 def app():
-    # Initialize session state for parsed data
-    if 'parsed_data' not in st.session_state:
-        st.session_state.parsed_data = None
-    if 'parsed_jd' not in st.session_state:
-        st.session_state.parsed_jd = None
-    if 'show_analysis' not in st.session_state:
-           st.session_state.show_analysis = False
-
-    st.set_page_config(
-        layout="wide",
-        page_title="ATS AI Resume Analyzer",
-        page_icon="🤖"
-    )
-
-    st.title("🤖 Advanced ATS Resume & JD Matcher (Manual Parsing)")
-    st.markdown(f"_AI parsing runs on demand using **{OPENAI_MODEL}** from OpenAI. Local model: **{LOCAL_MODEL_ID}**_")
-
-    if not OPENAI_API_KEY:
-           st.error("🚨 OPENAI_API_KEY NOT FOUND. AI features (parsing/extraction) are disabled. Please set your key.")
-
-    if LOCAL_EMBEDDING_MODEL is None:
-           st.warning("⚠️ **Local Model Failed to Load.** Semantic analysis is disabled. Check logs for missing dependencies (torch, sentence-transformers).")
+    if 'resume_data' not in st.session_state: st.session_state.resume_data = None
+    if 'jd_data' not in st.session_state: st.session_state.jd_data = None
+    if 'show_analysis' not in st.session_state: st.session_state.show_analysis = False
+        
+    st.set_page_config(layout="wide", page_title="ATS AI Resume Analyzer", page_icon="🤖")
+    st.title("🤖 Advanced ATS Resume & JD Matcher")
+    st.markdown(f"_Powered by **LangChain (Gemini)** & **{LOCAL_MODEL_ID}**_")
+    
+    if not GEMINI_API_KEY: st.error("🚨 GEMINI_API_KEY NOT FOUND.")
+    if LOCAL_EMBEDDING_MODEL is None: st.warning("⚠️ Local Model Failed to Load.")
 
     col_file, col_jd = st.columns([1, 1])
-
-    # --- INPUTS (Resume Content) ---
+    
     resume_text = ""
-
     with col_file:
-        st.subheader("1. Upload/Paste Resume Content")
-        uploaded_file = st.file_uploader("Upload PDF or TXT File", type=["pdf", "txt"], help="Uploads are processed locally for text extraction.")
+        st.subheader("1. Resume")
+        uploaded_file = st.file_uploader("Upload PDF/TXT", type=["pdf", "txt"])
+        if uploaded_file:
+            if uploaded_file.name.lower().endswith('.pdf'): resume_text = extract_text_from_pdf(uploaded_file)
+            elif uploaded_file.name.lower().endswith('.txt'): resume_text = uploaded_file.read().decode("utf-8")
+        if not resume_text: resume_text = st.text_area("Paste Resume", height=300)
+        else: st.text_area("Extracted Resume", resume_text, height=300)
 
-        if uploaded_file is not None:
-            if uploaded_file.name.lower().endswith('.pdf'):
-                resume_text = extract_text_from_pdf(uploaded_file)
-            elif uploaded_file.name.lower().endswith('.txt'):
-                resume_text = uploaded_file.read().decode("utf-8")
-
-        if not resume_text:
-            resume_text = st.text_area("Resume Content", "", height=300, key="resume_display_paste")
-        else:
-            resume_text = st.text_area("Extracted Resume Content (Editable)", resume_text, height=300, key="resume_display_edit")
-
-
-    # --- INPUTS (JD & Role Selection) ---
     with col_jd:
-        st.subheader("2. Select Job Role & Paste JD")
-
-        selected_domain = st.selectbox(
-            "Select the **Industry Domain**:",
-            options=DOMAIN_OPTIONS,
-            index=0,
-            key="domain_select"
-        )
-
+        st.subheader("2. Job Description")
+        selected_domain = st.selectbox("Industry Domain", DOMAIN_OPTIONS, index=0)
         available_roles = list(HIERARCHICAL_JOB_KEYWORDS.get(selected_domain, {}).keys())
-
-        selected_role = st.selectbox(
-            "Select the **Specific Job Role**:",
-            options=available_roles,
-            index=0 if available_roles else 0,
-            key="role_select"
-        )
-
-        jd_text = st.text_area("Job Description Content", height=320, key="jd_input",
-                                     placeholder=f"Paste the full job description for a {selected_role} role here...")
-
+        selected_role = st.selectbox("Target Role", available_roles, index=0)
+        jd_text = st.text_area("Paste JD", height=300)
+    
     st.divider()
+    
+    # --- Buttons ---
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        if st.button("🧠 Extract Resume Info"):
+            if resume_text: 
+                st.session_state.resume_data = parse_resume_with_langchain(resume_text, selected_role)
+                st.session_state.show_analysis = False
+    with c2:
+        if st.button("🔎 Extract JD Info"):
+            if jd_text:
+                st.session_state.jd_data = parse_jd_with_langchain(jd_text, selected_role)
+                st.session_state.show_analysis = False
+    with c3:
+        if st.button("🚀 Run Full ATS Analysis", type="primary"):
+            if resume_text and jd_text: st.session_state.show_analysis = True
 
-    # --- ANALYSIS & PARSING CONTROLS ---
+    # --- Gap Analysis (Auto) ---
+    if st.session_state.jd_data and st.session_state.resume_data:
+        st.markdown("---")
+        st.subheader("⚠️ Critical Gap Analysis")
+        gaps = check_critical_gaps(st.session_state.resume_data, st.session_state.jd_data)
+        if gaps:
+            for gap in gaps: st.error(gap)
+        else:
+            st.success("✅ No critical section gaps found!")
 
-    parse_resume_col, parse_jd_col, run_col = st.columns([1, 1, 1.5])
+    # --- Display Results ---
+    if st.session_state.jd_data:
+        st.markdown("---")
+        st.subheader("📋 Extracted JD Requirements")
+        jd = st.session_state.jd_data
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.info(f"**Title:** {jd.job_title}\n\n**Summary:** {jd.responsibilities_summary}")
+            st.markdown("**Required Skills:**")
+            st.code(", ".join(jd.required_skills), language="text")
+        with c2:
+            st.metric("Min Experience", jd.min_experience)
+            st.metric("Education", jd.min_education)
+            if jd.preferred_certifications:
+                st.markdown("**Preferred Certs:**")
+                for c in jd.preferred_certifications: st.write(f"- {c}")
 
-    with parse_resume_col:
-        if st.button(f"🧠 Extract Resume (AI)", type="secondary", use_container_width=True, key="parse_resume_button"):
-            if not resume_text:
-                st.error("Please provide resume content to extract fields.")
-            elif not OPENAI_API_KEY:
-                st.error("OpenAI API Key is required for parsing.")
-            else:
-                st.session_state.parsed_data = parse_resume_with_ai(resume_text, selected_role)
-                st.session_state.show_analysis = False # Reset report view
+    if st.session_state.resume_data:
+        st.markdown("---")
+        st.subheader("👤 Extracted Resume Data")
+        res = st.session_state.resume_data
+        
+        # Universal
+        st.text_area("Professional Summary", res.professional_summary, height=100)
+        st.text_area("Experience Summary", res.experience_summary, height=100)
+        
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            st.markdown("**Skills:**")
+            st.code(", ".join(res.skills), language="text")
+            st.markdown("**Education:**")
+            for edu in res.education: st.markdown(f"- {edu}")
+        with rc2:
+            st.markdown("**Certifications:**")
+            for c in res.certifications: st.markdown(f"- {c}")
+            st.markdown("**Objective:**")
+            st.write(res.career_objective)
+            
+        # Role Specific Display
+        st.markdown("#### Role-Specific Details")
+        rpc1, rpc2 = st.columns(2)
+        with rpc1:
+            if res.key_projects:
+                st.markdown("**Key Projects:**")
+                for p in res.key_projects: st.markdown(f"- {p}")
+            if res.research_publications:
+                st.markdown("**Research / Publications:**")
+                for p in res.research_publications: st.markdown(f"- {p}")
+        with rpc2:
+            if res.key_achievements:
+                st.markdown("**Key Achievements:**")
+                for a in res.key_achievements: st.markdown(f"- {a}")
+            if res.teaching_philosophy != "N/A":
+                st.markdown("**Teaching Philosophy:**")
+                st.info(res.teaching_philosophy)
 
-    with parse_jd_col:
-        if st.button(f"🔎 Extract JD Info (AI)", type="secondary", use_container_width=True, key="parse_jd_button"):
-            if not jd_text:
-                st.error("Please paste Job Description content to extract info.")
-            elif not OPENAI_API_KEY:
-                st.error("OpenAI API Key is required for parsing.")
-            else:
-                st.session_state.parsed_jd = parse_jd_with_ai(jd_text, selected_role)
-                st.session_state.show_analysis = False # Reset report view
-
-    # --- MAIN SCORING BUTTON ---
-    with run_col:
-        if st.button("Run Full ATS Analysis", type="primary", use_container_width=True):
-            if not resume_text or not jd_text:
-                st.error("🛑 Please ensure you have pasted the resume and job description content before running the analysis.")
-                return
-            st.session_state.show_analysis = True
-
-    # --- FINAL REPORT DISPLAY (Controlled by Button - UNCHANGED) ---
-
+    # --- Full Analysis ---
     if st.session_state.show_analysis and resume_text and jd_text:
-
-        with st.spinner('Running multi-layer ATS analysis...'):
-
-            # --- Core Calculations ---
+        st.markdown("---")
+        st.header("✨ ATS Match Report")
+        
+        with st.spinner('Analyzing...'):
             resume_tokens = clean_and_tokenize(resume_text)
             jd_tokens = clean_and_tokenize(jd_text)
-
-            lexical_score, common_keywords, missing_keywords = calculate_keyword_match_score(resume_tokens, jd_tokens)
+            
+            # KEYWORD UPDATE: Merge Base Keywords + Extracted JD Skills
+            tech_keywords = set(HIERARCHICAL_JOB_KEYWORDS.get(selected_domain, {}).get(selected_role, []))
+            
+            if st.session_state.jd_data and st.session_state.jd_data.required_skills:
+                 # Dynamic boosting from JD analysis
+                 for skill in st.session_state.jd_data.required_skills:
+                     tech_keywords.update(clean_and_tokenize(skill))
+            
+            lexical_score, common_kw, missing_kw = calculate_keyword_match_score(resume_tokens, jd_tokens)
             semantic_score = calculate_semantic_score(resume_text, jd_text)
-            issues, passed_checks, quantification_rate, strong_starter_count = run_rules_based_checks(resume_text, jd_text)
+            issues, passed, quant_rate, strong_v = run_rules_based_checks(resume_text, jd_text)
+            
+            missing_tech = missing_kw.intersection(tech_keywords)
+            matching_tech = common_kw.intersection(tech_keywords)
 
-            # --- START DYNAMIC KEYWORD BOOSTER LOGIC ---
-            tech_keywords_for_role = HIERARCHICAL_JOB_KEYWORDS[selected_domain][selected_role].copy()
-
-            if st.session_state.parsed_data:
-                extracted_skills_list = st.session_state.parsed_data.get('Relevant_Skills', [])
-                extracted_certs_list = st.session_state.parsed_data.get('Certifications_and_Degrees', [])
-
-                all_extracted_keywords = set()
-                for item in extracted_skills_list:
-                    all_extracted_keywords.update(clean_and_tokenize(item))
-                for item in extracted_certs_list:
-                      all_extracted_keywords.update(clean_and_tokenize(item))
-
-                tech_keywords_for_role.update(all_extracted_keywords)
-            # --- END DYNAMIC KEYWORD BOOSTER LOGIC ---
-
-            # --- Final Filtering ---
-            missing_tech_keywords = missing_keywords.intersection(tech_keywords_for_role)
-            matching_tech_keywords = common_keywords.intersection(tech_keywords_for_role)
-
-            # --- Overall Score (Weighted Average) ---
-            w_semantic = 0.40
-            w_lexical = 0.30
-            w_compliance = 0.30
-            compliance_score = max(0, 100 - (len(issues) * 15))
-
-            overall_score = (
-                (semantic_score * w_semantic / 100) +
-                (lexical_score * w_lexical / 100) +
-                (compliance_score * w_compliance / 100)
-            ) * 100
-
-            st.header("✨ Comprehensive ATS Match Report")
-
-            # --- SCORE CARDS & DONUT CHART (Professional Dashboard) ---
-            st.subheader("🎯 Overall Fit & Score Breakdown")
-
-            score_contribution_data = pd.DataFrame({
-                'Metric': ['Semantic Match', 'Lexical Match', 'Compliance Rating'],
-                'Contribution': [
-                    semantic_score * w_semantic,
-                    lexical_score * w_lexical,
-                    compliance_score * w_compliance
-                ]
+            w_sem, w_lex, w_comp = 0.4, 0.3, 0.3
+            comp_score = max(0, 100 - (len(issues) * 15))
+            overall = (semantic_score * w_sem) + (lexical_score * w_lex) + (comp_score * w_comp)
+            
+            # Display
+            mc1, mc2 = st.columns([1, 1])
+            source = pd.DataFrame({
+                "Category": ["Semantic", "Lexical", "Compliance"],
+                "Score": [semantic_score, lexical_score, comp_score]
             })
+            base = alt.Chart(source).encode(theta=alt.Theta("Score", stack=True))
+            pie = base.mark_arc(outerRadius=100).encode(color=alt.Color("Category"), tooltip=["Category", "Score"])
+            text = base.mark_text(radius=120).encode(text=alt.Text("Score", format=".1f"), color=alt.value("black"))
+            
+            with mc1: st.altair_chart(pie + text, use_container_width=True)
+            with mc2:
+                st.metric("Overall Match", f"{overall:.1f}%")
+                st.metric("Semantic", f"{semantic_score:.1f}%")
+                st.metric("Lexical", f"{lexical_score:.1f}%")
+                st.metric("Compliance", f"{comp_score}/100")
+                
+            c1, c2 = st.columns(2)
+            with c1:
+                st.error(f"Missing Keywords ({len(missing_tech)})")
+                st.write(", ".join(list(missing_tech)) if missing_tech else "None")
+            with c2:
+                st.success(f"Matching Keywords ({len(matching_tech)})")
+                st.write(", ".join(list(matching_tech)) if matching_tech else "None")
 
-            base = alt.Chart(score_contribution_data).encode(
-                theta=alt.Theta("Contribution", stack=True)
-            )
-
-            pie = base.mark_arc(outerRadius=120, innerRadius=80).encode(
-                color=alt.Color("Metric", scale=alt.Scale(range=['#0078D4', '#6BBF5E', '#FFC300'])),
-                order=alt.Order("Contribution", sort="descending"),
-                tooltip=["Metric", alt.Tooltip("Contribution", format=".1f")]
-            ).properties(height=300)
-
-
-            chart_col, metric_col = st.columns([1, 1])
-
-            with chart_col:
-                st.altair_chart(pie, use_container_width=True)
-
-            with metric_col:
-                st.metric("Overall Match Score", f"**{overall_score:.1f}%**",
-                          help="Weighted average of Semantic, Lexical, and Compliance scores (40/30/30).")
-
-                sem_col, lex_col, comp_col = st.columns(3)
-                with sem_col:
-                    st.metric("Semantic Match", f"{semantic_score:.1f}%")
-                with lex_col:
-                    st.metric("Lexical Match", f"{lexical_score:.1f}%")
-                with comp_col:
-                    st.metric("Compliance Rating", f"{compliance_score:.0f}/100")
-
-            st.markdown("---")
-
-            # --- QUALITY INSIGHTS & VISUALS (WITHOUT BAR CHART) ---
-            st.subheader("📊 Quality Indicators & Skill Gap Analysis")
-
-            insight_col1, insight_col2 = st.columns(2)
-
-            with insight_col1:
-                st.markdown("#### Writing Quality Metrics")
-                st.metric("Quantification Rate", f"{quantification_rate * 100:.0f}%",
-                                 help="Percentage of experience bullets containing metrics ($, %, numbers). Target is 40% or higher.")
-                st.info(f"Strong Action Vers Found: **{strong_starter_count}** statements.")
-
-
-            with insight_col2:
-                st.markdown(f"#### Unfiltered Keyword Match")
-                st.metric("Unfiltered Match Count", f"{len(common_keywords)}",
-                                 help="Total number of unique keywords matched from the entire Job Description.")
-                st.info(f"Total Unique Keywords in JD: **{len(missing_keywords) + len(common_keywords)}**")
-
-            st.markdown("---")
-
-            # --- DETAILED FEEDBACK ---
-            st.subheader("3. Detailed Improvement Suggestions (Action Items)")
-
-            issue_cols = st.columns([1, 1])
-
-            with issue_cols[0]:
-                st.markdown("#### 🛑 Critical Issues & Formatting Warnings")
-                if issues:
-                    for issue in issues:
-                        st.markdown(f"- {issue}")
-                else:
-                    st.success("🎉 No critical formatting or compliance issues detected.")
-
-            with issue_cols[1]:
-                st.markdown(f"#### Missing Required **{selected_role}** Skills")
-
-                if missing_tech_keywords:
-                    st.error(f"🔴 Missing **{len(missing_tech_keywords)}** key technical/certification terms for **{selected_role}**.")
-                    with st.expander("Show Top Missing Technical Keywords"):
-                        st.code(', '.join(sorted(list(missing_tech_keywords))[:30]), language="text")
-                else:
-                    st.success(f"✅ All major technical keywords for **{selected_role}** were found in your resume.")
-
-
-            st.markdown("#### Confirmed Resume Strengths (Passed Checks)")
-            if passed_checks:
-                for check in passed_checks:
-                    st.markdown(f"- {check}")
-
-            st.markdown("---")
-
-            # --- SECTION 4: TOP MATCHING TECH KEYWORDS ---
-            st.subheader(f"4. Top Matching Keywords (Your **{selected_role}** Strengths)")
-            if matching_tech_keywords:
-                st.code(', '.join(sorted(list(matching_tech_keywords))[:30]), language="text")
-            else:
-                st.info(f"No specific technical or framework keywords for **{selected_role}** were matched.")
-
-    # --- END SCORING/ANALYSIS BLOCK ---
-
-    # --- DISPLAY PARSED DATA SECTIONS (Visible when extracted - UNCHANGED) ---
-
-    if st.session_state.parsed_jd:
-        st.markdown("---")
-        jd_data = st.session_state.parsed_jd
-
-        st.subheader(f"🔍 Extracted JD Requirements for: {jd_data.get('Job_Title_Extracted', selected_role)}")
-
-        st.markdown("#### Core Responsibilities Summary")
-        resp_summary = jd_data.get('Core_Responsibilities_Summary', 'N/A')
-        st.info(resp_summary)
-
-        skill_req_col, exp_req_col = st.columns([1.5, 1])
-
-        with skill_req_col:
-            st.markdown("#### Must-Have Skills & Certifications")
-            skills = jd_data.get('Must_Have_Skills', [])
-            certs = jd_data.get('Preferred_Certifications', [])
-            all_requirements = skills + certs
-
-            if all_requirements:
-                st.code('\n'.join(all_requirements), language='text')
-            else:
-                st.warning("N/A: No explicit required skills extracted.")
-
-        with exp_req_col:
-            st.markdown("#### Minimum Requirements")
-            exp_req = jd_data.get('Min_Years_Experience', 'N/A')
-            min_edu = jd_data.get('Minimum_Education_Level', 'N/A')
-
-            st.metric(label="Min Years Experience", value=exp_req)
-            st.metric(label="Min Education Level", value=min_edu)
-
-        st.markdown("---")
-
-    if st.session_state.parsed_data:
-        st.markdown("---")
-        st.subheader(f"✅ Extracted Resume Fields for: {selected_role}")
-
-        data = st.session_state.parsed_data
-
-        role_info = ROLE_SPECIFIC_SCHEMAS.get(selected_role)
-        field_order = role_info["fields"] if role_info else list(UNIVERSAL_RESUME_PROPS.keys())
-
-        header_map = {
-            "Relevant_Skills": "Relevant Skills",
-            "Certifications_and_Degrees": "Certifications/Degrees",
-            "Key_Projects": "Key Projects",
-            "Key_Achievements": "Key Achievements",
-            "Most_Relevant_Experience_Summary": "Most Relevant Experience Summary",
-            "Teaching_Training_Summary": "Teaching/Training Summary",
-            "Research_and_Publications": "Research and Publications"
-        }
-
-        summary_field = next((f for f in field_order if 'Summary' in f or 'Experience' in f or 'Training' in f), None)
-        if summary_field:
-            st.markdown(f"#### {header_map.get(summary_field, summary_field)}")
-            st.info(data.get(summary_field, 'N/A'))
-
-        col1, col2 = st.columns(2)
-        field_index = 0
-
-        for field in field_order:
-            if field == summary_field:
-                continue
-
-            display_header = header_map.get(field, field.replace('_', ' '))
-            content = data.get(field)
-
-            if content is None or (isinstance(content, (list, str)) and not content):
-                content = "N/A"
-
-            with (col1 if field_index % 2 == 0 else col2):
-                if isinstance(content, list) and content != "N/A":
-                    st.code('\n'.join(content), language='text', label=display_header)
-                elif content == "N/A":
-                    st.warning(f"{display_header}: N/A")
-                else:
-                    st.text_area(display_header, content, height=100)
-            field_index += 1
-
+            if issues:
+                st.subheader("Compliance Issues")
+                for i in issues: st.write(i)
 
 if __name__ == "__main__":
     app()
