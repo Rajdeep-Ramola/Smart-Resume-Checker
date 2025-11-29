@@ -18,6 +18,9 @@ load_dotenv()
 
 # --- Configuration & Constants ---
 LOCAL_MODEL_ID = "BAAI/bge-small-en-v1.5"
+
+# FIX: Updated to the currently supported Groq model
+# Alternatives: "llama-3.1-8b-instant" (Faster) or "llama-3.3-70b-versatile" (Better Quality)
 GROQ_MODEL = "llama-3.3-70b-versatile" 
 
 try:
@@ -103,7 +106,7 @@ LOCAL_EMBEDDING_MODEL = load_local_embedding_model(LOCAL_MODEL_ID)
 def get_llm():
     if not GROQ_API_KEY:
         return None
-    # Initialize ChatGroq with Llama 3
+    # Initialize ChatGroq with the NEW model name
     return ChatGroq(
         model_name=GROQ_MODEL, 
         api_key=GROQ_API_KEY, 
@@ -257,14 +260,6 @@ def app():
         
     st.set_page_config(layout="wide", page_title="ATS AI Resume Analyzer", page_icon="🤖")
     
-    # --- Sidebar: Model Debugging ---
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        if GROQ_API_KEY:
-            st.success(f"API Key Found. Using Groq: {GROQ_MODEL}")
-        else:
-            st.error("Groq API Key Missing")
-
     st.title("🤖 Advanced ATS Resume & JD Matcher")
     st.markdown(f"_Powered by **LangChain (Groq/Llama3)** & **{LOCAL_MODEL_ID}**_")
     
