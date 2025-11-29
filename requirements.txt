@@ -1,15 +1,11 @@
 streamlit
-requests
 pandas
 numpy
 altair
-pypdf
 scipy
+pypdf
 sentence-transformers
-torch
 python-dotenv
 langchain
-langchain-google-genai
-langchain-core<0.3.0
+langchain-groq
 pydantic
-langchain-community
