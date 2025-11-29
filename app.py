@@ -8,8 +8,8 @@ import os
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 
-# --- LangChain Imports
-from langchain_google_genai import ChatGoogleGenerativeAI
+# --- LangChain Imports ---
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -18,15 +18,15 @@ load_dotenv()
 
 # --- Configuration & Constants ---
 LOCAL_MODEL_ID = "BAAI/bge-small-en-v1.5"
-GEMINI_MODEL = "models/gemini-1.5-flash" 
+GROQ_MODEL = "llama-3.3-70b-versatile" 
 
 try:
-    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets["GEMINI_API_KEY"]
+    # Get Groq API Key
+    GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or st.secrets["GROQ_API_KEY"]
 except:
-    GEMINI_API_KEY = ""
+    GROQ_API_KEY = ""
 
 # --- PYDANTIC SCHEMAS (STRUCTURED OUTPUT) ---
-# These define the strict shape of data we want Gemini to extract.
 
 class ResumeExtraction(BaseModel):
     """Schema for extracting resume information."""
@@ -38,7 +38,7 @@ class ResumeExtraction(BaseModel):
     skills: List[str] = Field(description="List of technical and soft skills.", default=[])
     certifications: List[str] = Field(description="List of certifications and licenses.", default=[])
     
-    # Role-Specific / Optional Fields (AI will fill these if found)
+    # Role-Specific / Optional Fields
     key_projects: List[str] = Field(description="List of key projects (Tech/Data roles).", default=[])
     key_achievements: List[str] = Field(description="List of quantifiable achievements (Business/Sales/Finance).", default=[])
     research_publications: List[str] = Field(description="List of publications (Academic roles).", default=[])
@@ -53,7 +53,7 @@ class JDExtraction(BaseModel):
     min_education: str = Field(description="Minimum education level.", default="N/A")
     preferred_certifications: List[str] = Field(description="List of preferred certifications.", default=[])
 
-# --- HIERARCHICAL KEYWORDS (Unchanged) ---
+# --- HIERARCHICAL JOB-SPECIFIC KEYWORDS (Unchanged) ---
 HIERARCHICAL_JOB_KEYWORDS = {
     "Technology & Engineering": {
         "Software Engineer": {'python', 'java', 'c++', 'oop', 'system_design', 'api', 'git', 'sql', 'docker', 'kubernetes', 'aws', 'testing'},
@@ -98,20 +98,24 @@ def load_local_embedding_model(model_name):
 
 LOCAL_EMBEDDING_MODEL = load_local_embedding_model(LOCAL_MODEL_ID)
 
-# --- LangChain Parsing Functions (Updated for Gemini) ---
+# --- LangChain Parsing Functions (Using Groq) ---
 
 def get_llm():
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         return None
-    # Initialize Gemini via LangChain
-    return ChatGoogleGenerativeAI(model=GEMINI_MODEL, google_api_key=GEMINI_API_KEY, temperature=0)
+    # Initialize ChatGroq with Llama 3
+    return ChatGroq(
+        model_name=GROQ_MODEL, 
+        api_key=GROQ_API_KEY, 
+        temperature=0
+    )
 
 @st.cache_data(show_spinner=False)
 def parse_resume_with_langchain(resume_text, selected_role):
     llm = get_llm()
     if not llm: return None
 
-    # Bind the Pydantic model to Gemini for structured output
+    # Bind the Pydantic model to Groq for structured output
     structured_llm = llm.with_structured_output(ResumeExtraction)
 
     prompt = ChatPromptTemplate.from_messages([
@@ -125,7 +129,7 @@ def parse_resume_with_langchain(resume_text, selected_role):
         with st.spinner("AI Extracting Resume Data..."):
             return chain.invoke({"text": resume_text})
     except Exception as e:
-        st.error(f"LangChain Error: {e}")
+        st.error(f"LangChain/Groq Error: {e}")
         return None
 
 @st.cache_data(show_spinner=False)
@@ -146,7 +150,7 @@ def parse_jd_with_langchain(jd_text, selected_role):
         with st.spinner("AI Extracting JD Data..."):
             return chain.invoke({"text": jd_text})
     except Exception as e:
-        st.error(f"LangChain Error: {e}")
+        st.error(f"LangChain/Groq Error: {e}")
         return None
 
 # --- Gap Analysis ---
@@ -252,10 +256,19 @@ def app():
     if 'show_analysis' not in st.session_state: st.session_state.show_analysis = False
         
     st.set_page_config(layout="wide", page_title="ATS AI Resume Analyzer", page_icon="🤖")
-    st.title("🤖 Advanced ATS Resume & JD Matcher")
-    st.markdown(f"_Powered by **LangChain (Gemini)** & **{LOCAL_MODEL_ID}**_")
     
-    if not GEMINI_API_KEY: st.error("🚨 GEMINI_API_KEY NOT FOUND.")
+    # --- Sidebar: Model Debugging ---
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        if GROQ_API_KEY:
+            st.success(f"API Key Found. Using Groq: {GROQ_MODEL}")
+        else:
+            st.error("Groq API Key Missing")
+
+    st.title("🤖 Advanced ATS Resume & JD Matcher")
+    st.markdown(f"_Powered by **LangChain (Groq/Llama3)** & **{LOCAL_MODEL_ID}**_")
+    
+    if not GROQ_API_KEY: st.error("🚨 GROQ_API_KEY NOT FOUND.")
     if LOCAL_EMBEDDING_MODEL is None: st.warning("⚠️ Local Model Failed to Load.")
 
     col_file, col_jd = st.columns([1, 1])
