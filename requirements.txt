@@ -8,4 +8,7 @@ scipy
 sentence-transformers
 torch
 python-dotenv
-openai
+langchain
+langchain-google-genai
+pydantic
+google-generativeai
