@@ -18,9 +18,6 @@ load_dotenv()
 
 # --- Configuration & Constants ---
 LOCAL_MODEL_ID = "BAAI/bge-small-en-v1.5"
-
-# FIX: Updated to the currently supported Groq model
-# Alternatives: "llama-3.1-8b-instant" (Faster) or "llama-3.3-70b-versatile" (Better Quality)
 GROQ_MODEL = "llama-3.3-70b-versatile" 
 
 try:
@@ -29,34 +26,34 @@ try:
 except:
     GROQ_API_KEY = ""
 
-# --- PYDANTIC SCHEMAS (STRUCTURED OUTPUT) ---
+# --- PYDANTIC SCHEMAS (Modified Defaults for Placeholders) ---
 
 class ResumeExtraction(BaseModel):
     """Schema for extracting resume information."""
-    # Universal Fields
-    professional_summary: str = Field(description="A concise summary of the candidate's background.", default="N/A")
-    career_objective: str = Field(description="The candidate's career goals.", default="N/A")
-    experience_summary: str = Field(description="A summarized paragraph of work history.", default="N/A")
+    # Changed defaults to empty strings/lists for clean UI initialization
+    professional_summary: str = Field(description="A concise summary of the candidate's background.", default="")
+    career_objective: str = Field(description="The candidate's career goals.", default="")
+    experience_summary: str = Field(description="A summarized paragraph of work history.", default="")
     education: List[str] = Field(description="List of degrees and schools.", default=[])
     skills: List[str] = Field(description="List of technical and soft skills.", default=[])
     certifications: List[str] = Field(description="List of certifications and licenses.", default=[])
     
     # Role-Specific / Optional Fields
     key_projects: List[str] = Field(description="List of key projects (Tech/Data roles).", default=[])
-    key_achievements: List[str] = Field(description="List of quantifiable achievements (Business/Sales/Finance).", default=[])
-    research_publications: List[str] = Field(description="List of publications (Academic roles).", default=[])
-    teaching_philosophy: str = Field(description="Teaching philosophy (Education roles).", default="N/A")
+    key_achievements: List[str] = Field(description="List of quantifiable achievements.", default=[])
+    research_publications: List[str] = Field(description="List of publications.", default=[])
+    teaching_philosophy: str = Field(description="Teaching philosophy.", default="")
 
 class JDExtraction(BaseModel):
     """Schema for extracting Job Description requirements."""
-    job_title: str = Field(description="The exact job title.", default="N/A")
-    responsibilities_summary: str = Field(description="Summary of core duties.", default="N/A")
+    job_title: str = Field(description="The exact job title.", default="")
+    responsibilities_summary: str = Field(description="Summary of core duties.", default="")
     required_skills: List[str] = Field(description="List of mandatory skills.", default=[])
-    min_experience: str = Field(description="Minimum years of experience.", default="N/A")
-    min_education: str = Field(description="Minimum education level.", default="N/A")
+    min_experience: str = Field(description="Minimum years of experience.", default="")
+    min_education: str = Field(description="Minimum education level.", default="")
     preferred_certifications: List[str] = Field(description="List of preferred certifications.", default=[])
 
-# --- HIERARCHICAL JOB-SPECIFIC KEYWORDS (Unchanged) ---
+# --- HIERARCHICAL JOB-SPECIFIC KEYWORDS ---
 HIERARCHICAL_JOB_KEYWORDS = {
     "Technology & Engineering": {
         "Software Engineer": {'python', 'java', 'c++', 'oop', 'system_design', 'api', 'git', 'sql', 'docker', 'kubernetes', 'aws', 'testing'},
@@ -91,7 +88,6 @@ DOMAIN_OPTIONS = list(HIERARCHICAL_JOB_KEYWORDS.keys())
 @st.cache_resource(show_spinner=f"Downloading {LOCAL_MODEL_ID}...")
 def load_local_embedding_model(model_name):
     try:
-        from sentence_transformers import SentenceTransformer
         CACHE_DIR = os.path.join(os.getcwd(), ".model_cache") 
         os.makedirs(CACHE_DIR, exist_ok=True)
         return SentenceTransformer(model_name, cache_folder=CACHE_DIR)
@@ -101,12 +97,11 @@ def load_local_embedding_model(model_name):
 
 LOCAL_EMBEDDING_MODEL = load_local_embedding_model(LOCAL_MODEL_ID)
 
-# --- LangChain Parsing Functions (Using Groq) ---
+# --- LangChain Parsing Functions ---
 
 def get_llm():
     if not GROQ_API_KEY:
         return None
-    # Initialize ChatGroq with the NEW model name
     return ChatGroq(
         model_name=GROQ_MODEL, 
         api_key=GROQ_API_KEY, 
@@ -161,12 +156,12 @@ def check_critical_gaps(resume_data: ResumeExtraction, jd_data: JDExtraction):
     gaps = []
     
     # 1. Check Experience
-    if jd_data.min_experience != "N/A":
-        if resume_data.experience_summary == "N/A" and not resume_data.key_achievements:
+    if jd_data.min_experience != "":
+        if resume_data.experience_summary == "" and not resume_data.key_achievements:
             gaps.append(f"⚠️ **Missing Experience:** JD requires '{jd_data.min_experience}', but no experience summary found.")
 
     # 2. Check Education
-    if jd_data.min_education != "N/A":
+    if jd_data.min_education != "":
         if not resume_data.education:
              gaps.append(f"⚠️ **Missing Education:** JD requires '{jd_data.min_education}', but education section is empty.")
     
@@ -182,7 +177,7 @@ def check_critical_gaps(resume_data: ResumeExtraction, jd_data: JDExtraction):
 
     return gaps
 
-# --- Core Logic ---
+# --- Text Processing Utilities ---
 try:
     from pypdf import PdfReader
 except ImportError:
@@ -254,9 +249,14 @@ def run_rules_based_checks(resume_text, jd_text):
 # --- Main App ---
 
 def app():
-    if 'resume_data' not in st.session_state: st.session_state.resume_data = None
-    if 'jd_data' not in st.session_state: st.session_state.jd_data = None
-    if 'show_analysis' not in st.session_state: st.session_state.show_analysis = False
+    # --- 1. INITIALIZE STATE WITH EMPTY MODELS ---
+    # This ensures the placeholders appear immediately on load
+    if 'resume_data' not in st.session_state: 
+        st.session_state.resume_data = ResumeExtraction() # Empty Object
+    if 'jd_data' not in st.session_state: 
+        st.session_state.jd_data = JDExtraction() # Empty Object
+    if 'show_analysis' not in st.session_state: 
+        st.session_state.show_analysis = False
         
     st.set_page_config(layout="wide", page_title="ATS AI Resume Analyzer", page_icon="🤖")
     
@@ -275,101 +275,128 @@ def app():
         if uploaded_file:
             if uploaded_file.name.lower().endswith('.pdf'): resume_text = extract_text_from_pdf(uploaded_file)
             elif uploaded_file.name.lower().endswith('.txt'): resume_text = uploaded_file.read().decode("utf-8")
-        if not resume_text: resume_text = st.text_area("Paste Resume", height=300)
-        else: st.text_area("Extracted Resume", resume_text, height=300)
+        
+        # Display extracted text preview
+        if not resume_text: 
+            resume_text = st.text_area("Paste Resume", height=200, placeholder="Or paste text here...")
+        else: 
+            st.success("✅ Resume Loaded")
+            with st.expander("View Raw Resume Text"):
+                st.text(resume_text[:1000] + "...")
 
     with col_jd:
         st.subheader("2. Job Description")
         selected_domain = st.selectbox("Industry Domain", DOMAIN_OPTIONS, index=0)
         available_roles = list(HIERARCHICAL_JOB_KEYWORDS.get(selected_domain, {}).keys())
         selected_role = st.selectbox("Target Role", available_roles, index=0)
-        jd_text = st.text_area("Paste JD", height=300)
+        jd_text = st.text_area("Paste JD", height=200, placeholder="Paste Job Description here...")
     
     st.divider()
     
     # --- Buttons ---
     c1, c2, c3 = st.columns([1, 1, 2])
     with c1:
-        if st.button("🧠 Extract Resume Info"):
+        if st.button("🧠 Extract Resume Info", use_container_width=True):
             if resume_text: 
                 st.session_state.resume_data = parse_resume_with_langchain(resume_text, selected_role)
                 st.session_state.show_analysis = False
+            else:
+                st.warning("Please upload a resume first.")
     with c2:
-        if st.button("🔎 Extract JD Info"):
+        if st.button("🔎 Extract JD Info", use_container_width=True):
             if jd_text:
                 st.session_state.jd_data = parse_jd_with_langchain(jd_text, selected_role)
                 st.session_state.show_analysis = False
+            else:
+                st.warning("Please paste a JD first.")
     with c3:
-        if st.button("🚀 Run Full ATS Analysis", type="primary"):
-            if resume_text and jd_text: st.session_state.show_analysis = True
+        if st.button("🚀 Run Full ATS Analysis", type="primary", use_container_width=True):
+            if resume_text and jd_text: 
+                st.session_state.show_analysis = True
+            else:
+                st.error("Please provide both Resume and JD Text.")
 
-    # --- Gap Analysis (Auto) ---
-    if st.session_state.jd_data and st.session_state.resume_data:
+    # --- 2. ALWAYS VISIBLE DISPLAY SECTIONS (Aliases for readability) ---
+    res = st.session_state.resume_data
+    jd = st.session_state.jd_data
+    
+    st.markdown("---")
+    
+    # Grid Layout for extracted info
+    d_col1, d_col2 = st.columns(2)
+    
+    # --- Left Column: Resume Data ---
+    with d_col1:
+        st.subheader("👤 Resume Data Structure")
+        
+        # Professional Summary
+        st.caption("Professional Summary")
+        # If empty, it shows "Waiting..."
+        st.info(res.professional_summary if res.professional_summary else "Waiting for extraction...")
+
+        # Skills & Education in sub-columns
+        sub_c1, sub_c2 = st.columns(2)
+        with sub_c1:
+            st.caption("Skills")
+            skills_display = ", ".join(res.skills) if res.skills else "Waiting..."
+            st.code(skills_display, language="text")
+        with sub_c2:
+            st.caption("Education")
+            if res.education:
+                for edu in res.education: st.text(f"• {edu}")
+            else:
+                st.text("Waiting...")
+
+        # Experience / Projects
+        st.caption("Experience Summary")
+        st.text_area("Exp", value=res.experience_summary, height=100, disabled=True, label_visibility="collapsed")
+        
+        # Optional Role Specifics
+        if res.key_projects:
+            st.caption("Key Projects")
+            for p in res.key_projects: st.markdown(f"- {p}")
+            
+    # --- Right Column: JD Data ---
+    with d_col2:
+        st.subheader("📋 JD Data Structure")
+        
+        # Job Title
+        st.caption("Job Title")
+        st.text_input("Title", value=jd.job_title, disabled=True, placeholder="Waiting...")
+        
+        # Responsibilities
+        st.caption("Responsibilities Summary")
+        st.info(jd.responsibilities_summary if jd.responsibilities_summary else "Waiting for extraction...")
+        
+        # Metrics & Skills
+        sub_d1, sub_d2 = st.columns(2)
+        with sub_d1:
+            st.metric("Min Experience", value=jd.min_experience if jd.min_experience else "-")
+            st.caption("Required Skills")
+            skills_jd_display = ", ".join(jd.required_skills) if jd.required_skills else "Waiting..."
+            st.code(skills_jd_display, language="text")
+        with sub_d2:
+            st.metric("Min Education", value=jd.min_education if jd.min_education else "-")
+            st.caption("Preferred Certs")
+            if jd.preferred_certifications:
+                 for c in jd.preferred_certifications: st.text(f"• {c}")
+            else:
+                 st.text("Waiting...")
+
+    # --- Gap Analysis (Only show if actual data exists) ---
+    has_res_data = len(res.skills) > 0
+    has_jd_data = len(jd.required_skills) > 0
+
+    if has_res_data and has_jd_data:
         st.markdown("---")
         st.subheader("⚠️ Critical Gap Analysis")
-        gaps = check_critical_gaps(st.session_state.resume_data, st.session_state.jd_data)
+        gaps = check_critical_gaps(res, jd)
         if gaps:
             for gap in gaps: st.error(gap)
         else:
             st.success("✅ No critical section gaps found!")
 
-    # --- Display Results ---
-    if st.session_state.jd_data:
-        st.markdown("---")
-        st.subheader("📋 Extracted JD Requirements")
-        jd = st.session_state.jd_data
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.info(f"**Title:** {jd.job_title}\n\n**Summary:** {jd.responsibilities_summary}")
-            st.markdown("**Required Skills:**")
-            st.code(", ".join(jd.required_skills), language="text")
-        with c2:
-            st.metric("Min Experience", jd.min_experience)
-            st.metric("Education", jd.min_education)
-            if jd.preferred_certifications:
-                st.markdown("**Preferred Certs:**")
-                for c in jd.preferred_certifications: st.write(f"- {c}")
-
-    if st.session_state.resume_data:
-        st.markdown("---")
-        st.subheader("👤 Extracted Resume Data")
-        res = st.session_state.resume_data
-        
-        # Universal
-        st.text_area("Professional Summary", res.professional_summary, height=100)
-        st.text_area("Experience Summary", res.experience_summary, height=100)
-        
-        rc1, rc2 = st.columns(2)
-        with rc1:
-            st.markdown("**Skills:**")
-            st.code(", ".join(res.skills), language="text")
-            st.markdown("**Education:**")
-            for edu in res.education: st.markdown(f"- {edu}")
-        with rc2:
-            st.markdown("**Certifications:**")
-            for c in res.certifications: st.markdown(f"- {c}")
-            st.markdown("**Objective:**")
-            st.write(res.career_objective)
-            
-        # Role Specific Display
-        st.markdown("#### Role-Specific Details")
-        rpc1, rpc2 = st.columns(2)
-        with rpc1:
-            if res.key_projects:
-                st.markdown("**Key Projects:**")
-                for p in res.key_projects: st.markdown(f"- {p}")
-            if res.research_publications:
-                st.markdown("**Research / Publications:**")
-                for p in res.research_publications: st.markdown(f"- {p}")
-        with rpc2:
-            if res.key_achievements:
-                st.markdown("**Key Achievements:**")
-                for a in res.key_achievements: st.markdown(f"- {a}")
-            if res.teaching_philosophy != "N/A":
-                st.markdown("**Teaching Philosophy:**")
-                st.info(res.teaching_philosophy)
-
-    # --- Full Analysis ---
+    # --- Full Analysis Chart (Only if requested) ---
     if st.session_state.show_analysis and resume_text and jd_text:
         st.markdown("---")
         st.header("✨ ATS Match Report")
@@ -381,9 +408,8 @@ def app():
             # KEYWORD UPDATE: Merge Base Keywords + Extracted JD Skills
             tech_keywords = set(HIERARCHICAL_JOB_KEYWORDS.get(selected_domain, {}).get(selected_role, []))
             
-            if st.session_state.jd_data and st.session_state.jd_data.required_skills:
-                 # Dynamic boosting from JD analysis
-                 for skill in st.session_state.jd_data.required_skills:
+            if jd.required_skills:
+                 for skill in jd.required_skills:
                      tech_keywords.update(clean_and_tokenize(skill))
             
             lexical_score, common_kw, missing_kw = calculate_keyword_match_score(resume_tokens, jd_tokens)
@@ -397,7 +423,7 @@ def app():
             comp_score = max(0, 100 - (len(issues) * 15))
             overall = (semantic_score * w_sem) + (lexical_score * w_lex) + (comp_score * w_comp)
             
-            # Display
+            # Display Charts
             mc1, mc2 = st.columns([1, 1])
             source = pd.DataFrame({
                 "Category": ["Semantic", "Lexical", "Compliance"],
