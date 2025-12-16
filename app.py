@@ -26,11 +26,10 @@ try:
 except:
     GROQ_API_KEY = ""
 
-# --- PYDANTIC SCHEMAS (Modified Defaults for Placeholders) ---
+# --- PYDANTIC SCHEMAS (Empty Defaults for Clean UI) ---
 
 class ResumeExtraction(BaseModel):
     """Schema for extracting resume information."""
-    # Changed defaults to empty strings/lists for clean UI initialization
     professional_summary: str = Field(description="A concise summary of the candidate's background.", default="")
     career_objective: str = Field(description="The candidate's career goals.", default="")
     experience_summary: str = Field(description="A summarized paragraph of work history.", default="")
@@ -113,7 +112,6 @@ def parse_resume_with_langchain(resume_text, selected_role):
     llm = get_llm()
     if not llm: return None
 
-    # Bind the Pydantic model to Groq for structured output
     structured_llm = llm.with_structured_output(ResumeExtraction)
 
     prompt = ChatPromptTemplate.from_messages([
@@ -155,22 +153,18 @@ def parse_jd_with_langchain(jd_text, selected_role):
 def check_critical_gaps(resume_data: ResumeExtraction, jd_data: JDExtraction):
     gaps = []
     
-    # 1. Check Experience
     if jd_data.min_experience != "":
         if resume_data.experience_summary == "" and not resume_data.key_achievements:
             gaps.append(f"⚠️ **Missing Experience:** JD requires '{jd_data.min_experience}', but no experience summary found.")
 
-    # 2. Check Education
     if jd_data.min_education != "":
         if not resume_data.education:
              gaps.append(f"⚠️ **Missing Education:** JD requires '{jd_data.min_education}', but education section is empty.")
     
-    # 3. Check Skills
     if jd_data.required_skills:
         if not resume_data.skills:
              gaps.append("⚠️ **Missing Skills:** JD lists required skills, but resume skills section is empty.")
              
-    # 4. Check Certifications (if strictly required)
     if jd_data.preferred_certifications:
         if not resume_data.certifications:
              gaps.append("⚠️ **Missing Certifications:** JD lists preferred certifications, but none found in resume.")
@@ -249,17 +243,33 @@ def run_rules_based_checks(resume_text, jd_text):
 # --- Main App ---
 
 def app():
-    # --- 1. INITIALIZE STATE WITH EMPTY MODELS ---
-    # This ensures the placeholders appear immediately on load
+    # --- 1. INITIALIZE STATE ---
     if 'resume_data' not in st.session_state: 
-        st.session_state.resume_data = ResumeExtraction() # Empty Object
+        st.session_state.resume_data = ResumeExtraction() 
     if 'jd_data' not in st.session_state: 
-        st.session_state.jd_data = JDExtraction() # Empty Object
+        st.session_state.jd_data = JDExtraction() 
     if 'show_analysis' not in st.session_state: 
         st.session_state.show_analysis = False
         
     st.set_page_config(layout="wide", page_title="ATS AI Resume Analyzer", page_icon="🤖")
-    
+
+    # --- 2. SIDEBAR CONFIGURATION (NEW) ---
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        st.markdown("### ⚖️ Scoring Weights")
+        st.caption("Adjust importance of each metric.")
+        
+        w_sem = st.slider("Semantic (Meaning)", 0.0, 1.0, 0.4, 0.05, help="How much context/meaning matters.")
+        w_lex = st.slider("Lexical (Keywords)", 0.0, 1.0, 0.3, 0.05, help="How much exact keyword matching matters.")
+        w_comp = st.slider("Compliance (Format)", 0.0, 1.0, 0.3, 0.05, help="How much formatting/metrics matter.")
+        
+        total_weight = w_sem + w_lex + w_comp
+        if total_weight != 1.0:
+            st.warning(f"⚠️ Total Weight is {total_weight:.2f}. Ideal sum is 1.0")
+        else:
+            st.success("✅ Weights Balanced")
+
+    # --- 3. MAIN UI ---
     st.title("🤖 Advanced ATS Resume & JD Matcher")
     st.markdown(f"_Powered by **LangChain (Groq/Llama3)** & **{LOCAL_MODEL_ID}**_")
     
@@ -276,7 +286,6 @@ def app():
             if uploaded_file.name.lower().endswith('.pdf'): resume_text = extract_text_from_pdf(uploaded_file)
             elif uploaded_file.name.lower().endswith('.txt'): resume_text = uploaded_file.read().decode("utf-8")
         
-        # Display extracted text preview
         if not resume_text: 
             resume_text = st.text_area("Paste Resume", height=200, placeholder="Or paste text here...")
         else: 
@@ -316,25 +325,19 @@ def app():
             else:
                 st.error("Please provide both Resume and JD Text.")
 
-    # --- 2. ALWAYS VISIBLE DISPLAY SECTIONS (Aliases for readability) ---
+    # --- DISPLAY SECTIONS ---
     res = st.session_state.resume_data
     jd = st.session_state.jd_data
     
     st.markdown("---")
     
-    # Grid Layout for extracted info
     d_col1, d_col2 = st.columns(2)
     
-    # --- Left Column: Resume Data ---
     with d_col1:
         st.subheader("👤 Resume Data Structure")
-        
-        # Professional Summary
         st.caption("Professional Summary")
-        # If empty, it shows "Waiting..."
         st.info(res.professional_summary if res.professional_summary else "Waiting for extraction...")
 
-        # Skills & Education in sub-columns
         sub_c1, sub_c2 = st.columns(2)
         with sub_c1:
             st.caption("Skills")
@@ -347,28 +350,21 @@ def app():
             else:
                 st.text("Waiting...")
 
-        # Experience / Projects
         st.caption("Experience Summary")
         st.text_area("Exp", value=res.experience_summary, height=100, disabled=True, label_visibility="collapsed")
         
-        # Optional Role Specifics
         if res.key_projects:
             st.caption("Key Projects")
             for p in res.key_projects: st.markdown(f"- {p}")
             
-    # --- Right Column: JD Data ---
     with d_col2:
         st.subheader("📋 JD Data Structure")
-        
-        # Job Title
         st.caption("Job Title")
         st.text_input("Title", value=jd.job_title, disabled=True, placeholder="Waiting...")
         
-        # Responsibilities
         st.caption("Responsibilities Summary")
         st.info(jd.responsibilities_summary if jd.responsibilities_summary else "Waiting for extraction...")
         
-        # Metrics & Skills
         sub_d1, sub_d2 = st.columns(2)
         with sub_d1:
             st.metric("Min Experience", value=jd.min_experience if jd.min_experience else "-")
@@ -383,7 +379,6 @@ def app():
             else:
                  st.text("Waiting...")
 
-    # --- Gap Analysis (Only show if actual data exists) ---
     has_res_data = len(res.skills) > 0
     has_jd_data = len(jd.required_skills) > 0
 
@@ -396,7 +391,7 @@ def app():
         else:
             st.success("✅ No critical section gaps found!")
 
-    # --- Full Analysis Chart (Only if requested) ---
+    # --- Full Analysis Chart ---
     if st.session_state.show_analysis and resume_text and jd_text:
         st.markdown("---")
         st.header("✨ ATS Match Report")
@@ -405,7 +400,6 @@ def app():
             resume_tokens = clean_and_tokenize(resume_text)
             jd_tokens = clean_and_tokenize(jd_text)
             
-            # KEYWORD UPDATE: Merge Base Keywords + Extracted JD Skills
             tech_keywords = set(HIERARCHICAL_JOB_KEYWORDS.get(selected_domain, {}).get(selected_role, []))
             
             if jd.required_skills:
@@ -419,8 +413,10 @@ def app():
             missing_tech = missing_kw.intersection(tech_keywords)
             matching_tech = common_kw.intersection(tech_keywords)
 
-            w_sem, w_lex, w_comp = 0.4, 0.3, 0.3
+            # --- DYNAMIC SCORING LOGIC (Using Sidebar Variables) ---
             comp_score = max(0, 100 - (len(issues) * 15))
+            
+            # Using w_sem, w_lex, w_comp from the sidebar
             overall = (semantic_score * w_sem) + (lexical_score * w_lex) + (comp_score * w_comp)
             
             # Display Charts
